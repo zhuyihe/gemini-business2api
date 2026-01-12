@@ -1215,6 +1215,7 @@ async def chat_impl(
             # 新对话：轮询选择可用账户，失败时尝试其他账户
             max_account_tries = min(MAX_NEW_SESSION_TRIES, len(multi_account_mgr.accounts))
             last_error = None
+            account_manager = None  # 初始化变量
 
             for attempt in range(max_account_tries):
                 try:
@@ -1235,14 +1236,19 @@ async def chat_impl(
                     last_error = e
                     error_type = type(e).__name__
                     # 安全获取账户ID
-                    account_id = account_manager.config.account_id if 'account_manager' in locals() and account_manager else 'unknown'
+                    account_id = account_manager.config.account_id if account_manager else 'unknown'
                     logger.error(f"[CHAT] [req_{request_id}] 账户 {account_id} 创建会话失败 (尝试 {attempt + 1}/{max_account_tries}) - {error_type}: {str(e)}")
                     # 记录账号池状态（单个账户失败）
                     uptime_tracker.record_request("account_pool", False)
+                    account_manager = None  # 重置，准备下一次尝试
                     if attempt == max_account_tries - 1:
                         logger.error(f"[CHAT] [req_{request_id}] 所有账户均不可用")
                         raise HTTPException(503, f"All accounts unavailable: {str(last_error)[:100]}")
                     # 继续尝试下一个账户
+            
+            # 确保 account_manager 已成功获取
+            if account_manager is None:
+                raise HTTPException(503, "No available account")
 
     # 提取用户消息内容用于日志
     if req.messages:
