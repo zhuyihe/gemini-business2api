@@ -393,7 +393,10 @@ function renderApiKeysList(keys) {
         html += `
             <tr>
                 <td style="padding: 12px;">
-                    <code style="font-size: 12px; background: #f0f0f2; padding: 4px 8px; border-radius: 4px;">${key.masked_key}</code>
+                    <div style="display: flex; align-items: center; gap: 6px;">
+                        <code style="font-size: 12px; background: #f0f0f2; padding: 4px 8px; border-radius: 4px;">${key.masked_key}</code>
+                        <button class="btn" style="padding: 2px 6px; font-size: 10px;" onclick="copyApiKey('${key.key}')" title="复制完整 Key">📋</button>
+                    </div>
                 </td>
                 <td style="padding: 12px; color: #1d1d1f; font-size: 13px;">${key.note || '<span style="color: #86868b;">-</span>'}</td>
                 <td style="padding: 12px; text-align: center;">
@@ -478,6 +481,21 @@ async function createApiKey() {
 
 function closeShowKeyModal() {
     document.getElementById('showKeyModal').classList.remove('show');
+}
+
+function copyApiKey(key) {
+    navigator.clipboard.writeText(key).then(() => {
+        alert('✅ 已复制完整 API Key 到剪贴板！');
+    }).catch(err => {
+        // 降级方案：创建临时输入框
+        const input = document.createElement('input');
+        input.value = key;
+        document.body.appendChild(input);
+        input.select();
+        document.execCommand('copy');
+        document.body.removeChild(input);
+        alert('✅ 已复制完整 API Key 到剪贴板！');
+    });
 }
 
 async function deleteApiKey(key) {
