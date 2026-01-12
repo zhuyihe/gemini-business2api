@@ -1,0 +1,24 @@
+name: Sync to HuggingFace Spaces
+
+on:
+  push:
+    branches:
+      - main  # 或者你的主分支名称
+  workflow_dispatch:  # 允许手动触发
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          lfs: true
+
+      - name: Push to HuggingFace
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          git remote add hf https://oauth2:${HF_TOKEN}@huggingface.co/spaces/${{ secrets.HF_SPACE_ID }}
+          git push hf main --force
