@@ -570,6 +570,22 @@ class ChatRequest(BaseModel):
     temperature: Optional[float] = 0.7
     top_p: Optional[float] = 1.0
 
+# ---------- Responses API 模型定义 ----------
+class ResponsesInputItem(BaseModel):
+    """Responses API 输入项"""
+    role: str
+    content: Union[str, List[Dict[str, Any]]]
+
+class ResponsesRequest(BaseModel):
+    """OpenAI Responses API 请求格式"""
+    model: str = "gemini-auto"
+    input: Union[str, List[ResponsesInputItem]]  # 支持字符串或消息数组
+    instructions: Optional[str] = None  # 系统指令
+    stream: bool = False
+    temperature: Optional[float] = 0.7
+    top_p: Optional[float] = 1.0
+    max_output_tokens: Optional[int] = None
+
 def create_chunk(id: str, created: int, model: str, delta: dict, finish_reason: Union[str, None]) -> str:
     chunk = {
         "id": id,
@@ -1158,6 +1174,229 @@ if PATH_PREFIX:
         authorization: Optional[str] = Header(None)
     ):
         return await chat(req, request, authorization)
+
+# ---------- Responses API 端点 ----------
+@app.post("/v1/responses")
+async def responses_api(
+    req: ResponsesRequest,
+    request: Request,
+    authorization: Optional[str] = Header(None)
+):
+    """OpenAI Responses API 兼容端点"""
+    verify_api_key(API_KEY, authorization)
+    return await responses_impl(req, request, authorization)
+
+if PATH_PREFIX:
+    @app.post(f"/{PATH_PREFIX}/v1/responses")
+    async def responses_api_prefixed(
+        req: ResponsesRequest,
+        request: Request,
+        authorization: Optional[str] = Header(None)
+    ):
+        return await responses_api(req, request, authorization)
+
+async def responses_impl(
+    req: ResponsesRequest,
+    request: Request,
+    authorization: Optional[str]
+):
+    """Responses API 实现 - 转换为 chat completions 格式处理"""
+    # 将 Responses API 格式转换为 ChatRequest 格式
+    messages = []
+    
+    # 添加系统指令（如果有）
+    if req.instructions:
+        messages.append(Message(role="system", content=req.instructions))
+    
+    # 处理 input
+    if isinstance(req.input, str):
+        # 简单字符串输入
+        messages.append(Message(role="user", content=req.input))
+    else:
+        # 消息数组输入
+        for item in req.input:
+            messages.append(Message(role=item.role, content=item.content))
+    
+    # 创建 ChatRequest
+    chat_req = ChatRequest(
+        model=req.model,
+        messages=messages,
+        stream=req.stream,
+        temperature=req.temperature,
+        top_p=req.top_p
+    )
+    
+    # 如果是流式请求，使用 Responses API 流式格式
+    if req.stream:
+        return await responses_stream_impl(chat_req, request, authorization, req)
+    
+    # 非流式：调用 chat_impl 并转换响应格式
+    chat_req.stream = False
+    chat_response = await chat_impl(chat_req, request, authorization)
+    
+    # 转换为 Responses API 格式
+    return convert_to_responses_format(chat_response, req)
+
+async def responses_stream_impl(
+    chat_req: ChatRequest,
+    request: Request,
+    authorization: Optional[str],
+    original_req: ResponsesRequest
+):
+    """Responses API 流式响应实现"""
+    response_id = f"resp_{uuid.uuid4().hex[:48]}"
+    message_id = f"msg_{uuid.uuid4().hex[:48]}"
+    created_at = int(time.time())
+    
+    # 提取 API Key
+    used_api_key = None
+    if authorization:
+        used_api_key = authorization[7:] if authorization.startswith("Bearer ") else authorization
+    
+    async def generate_responses_stream():
+        # 发送 response.created 事件
+        yield f"event: response.created\ndata: {json.dumps({'type': 'response.created', 'response': {'id': response_id, 'object': 'response', 'created_at': created_at, 'status': 'in_progress', 'model': original_req.model}})}\n\n"
+        
+        # 发送 response.in_progress 事件
+        yield f"event: response.in_progress\ndata: {json.dumps({'type': 'response.in_progress', 'response': {'id': response_id, 'status': 'in_progress'}})}\n\n"
+        
+        # 发送 response.output_item.added 事件
+        yield f"event: response.output_item.added\ndata: {json.dumps({'type': 'response.output_item.added', 'output_index': 0, 'item': {'type': 'message', 'id': message_id, 'role': 'assistant', 'status': 'in_progress', 'content': []}})}\n\n"
+        
+        # 发送 response.content_part.added 事件
+        yield f"event: response.content_part.added\ndata: {json.dumps({'type': 'response.content_part.added', 'item_id': message_id, 'output_index': 0, 'content_index': 0, 'part': {'type': 'output_text', 'text': '', 'annotations': []}})}\n\n"
+        
+        full_text = ""
+        input_tokens = 0
+        output_tokens = 0
+        
+        try:
+            # 调用 chat_impl 获取流式响应
+            chat_req.stream = True
+            streaming_response = await chat_impl(chat_req, request, authorization)
+            
+            # 读取流式响应
+            if hasattr(streaming_response, 'body_iterator'):
+                async for chunk in streaming_response.body_iterator:
+                    if isinstance(chunk, bytes):
+                        chunk = chunk.decode('utf-8')
+                    
+                    for line in chunk.split('\n'):
+                        line = line.strip()
+                        if not line or not line.startswith('data: '):
+                            continue
+                        
+                        data_str = line[6:]
+                        if data_str == '[DONE]':
+                            break
+                        
+                        try:
+                            data = json.loads(data_str)
+                            if 'choices' in data and len(data['choices']) > 0:
+                                delta = data['choices'][0].get('delta', {})
+                                content = delta.get('content', '')
+                                if content:
+                                    full_text += content
+                                    # 发送 response.output_text.delta 事件
+                                    yield f"event: response.output_text.delta\ndata: {json.dumps({'type': 'response.output_text.delta', 'item_id': message_id, 'output_index': 0, 'content_index': 0, 'delta': content})}\n\n"
+                        except json.JSONDecodeError:
+                            pass
+            
+            # 估算 tokens
+            input_tokens = len(str(chat_req.messages)) // 4
+            output_tokens = len(full_text) // 4
+            
+            # 记录用量
+            if used_api_key:
+                from core.api_keys import record_usage
+                record_usage(used_api_key, original_req.model, True)
+            
+        except Exception as e:
+            logger.error(f"[RESPONSES] 流式响应错误: {e}")
+            yield f"event: error\ndata: {json.dumps({'type': 'error', 'error': {'message': str(e)}})}\n\n"
+            return
+        
+        # 发送 response.output_text.done 事件
+        yield f"event: response.output_text.done\ndata: {json.dumps({'type': 'response.output_text.done', 'item_id': message_id, 'output_index': 0, 'content_index': 0, 'text': full_text})}\n\n"
+        
+        # 发送 response.content_part.done 事件
+        yield f"event: response.content_part.done\ndata: {json.dumps({'type': 'response.content_part.done', 'item_id': message_id, 'output_index': 0, 'content_index': 0, 'part': {'type': 'output_text', 'text': full_text, 'annotations': []}})}\n\n"
+        
+        # 发送 response.output_item.done 事件
+        yield f"event: response.output_item.done\ndata: {json.dumps({'type': 'response.output_item.done', 'output_index': 0, 'item': {'type': 'message', 'id': message_id, 'role': 'assistant', 'status': 'completed', 'content': [{'type': 'output_text', 'text': full_text, 'annotations': []}]}})}\n\n"
+        
+        # 发送 response.completed 事件
+        completed_response = {
+            'type': 'response.completed',
+            'response': {
+                'id': response_id,
+                'object': 'response',
+                'created_at': created_at,
+                'status': 'completed',
+                'model': original_req.model,
+                'output': [{
+                    'type': 'message',
+                    'id': message_id,
+                    'role': 'assistant',
+                    'status': 'completed',
+                    'content': [{'type': 'output_text', 'text': full_text, 'annotations': []}]
+                }],
+                'usage': {
+                    'input_tokens': input_tokens,
+                    'output_tokens': output_tokens,
+                    'total_tokens': input_tokens + output_tokens
+                }
+            }
+        }
+        yield f"event: response.completed\ndata: {json.dumps(completed_response)}\n\n"
+    
+    return StreamingResponse(
+        generate_responses_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no"
+        }
+    )
+
+def convert_to_responses_format(chat_response, req: ResponsesRequest):
+    """将 chat completions 响应转换为 Responses API 格式"""
+    response_id = f"resp_{uuid.uuid4().hex[:48]}"
+    message_id = f"msg_{uuid.uuid4().hex[:48]}"
+    created_at = int(time.time())
+    
+    # 从 chat_response 提取内容
+    if isinstance(chat_response, dict):
+        content = chat_response.get("choices", [{}])[0].get("message", {}).get("content", "")
+        usage = chat_response.get("usage", {})
+    else:
+        content = ""
+        usage = {}
+    
+    return {
+        "id": response_id,
+        "object": "response",
+        "created_at": created_at,
+        "status": "completed",
+        "model": req.model,
+        "output": [{
+            "type": "message",
+            "id": message_id,
+            "role": "assistant",
+            "status": "completed",
+            "content": [{
+                "type": "output_text",
+                "text": content,
+                "annotations": []
+            }]
+        }],
+        "usage": {
+            "input_tokens": usage.get("prompt_tokens", 0),
+            "output_tokens": usage.get("completion_tokens", 0),
+            "total_tokens": usage.get("total_tokens", 0)
+        }
+    }
 
 # chat实现函数
 async def chat_impl(
