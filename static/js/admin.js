@@ -340,22 +340,14 @@ function renderApiKeysSummary(stats, storage) {
     
     // 存储模式提示
     let storageHint = '';
-    if (storage && storage.mode === 'env') {
+    if (storage && storage.mode === 'hf_free') {
         storageHint = `
             <div style="grid-column: 1 / -1; background: #fff3cd; border: 1px solid #ffc107; padding: 12px; border-radius: 8px; margin-bottom: 8px;">
-                <div style="font-weight: 600; color: #856404; margin-bottom: 4px;">⚠️ 免费版存储提示</div>
+                <div style="font-weight: 600; color: #856404; margin-bottom: 4px;">⚠️ HF 免费版存储提示</div>
                 <div style="font-size: 12px; color: #856404;">
-                    当前使用环境变量存储 Keys。新增/删除 Key 后，请点击"导出配置"按钮，将配置复制到 HF Spaces 的 <code>API_KEYS_CONFIG</code> 环境变量中，否则重启后会丢失。
+                    新增/删除 Key 后，请点击"导出配置"，将配置复制到 HF Spaces 的 <code>API_KEYS_CONFIG</code> 环境变量，否则重启后会丢失。
                 </div>
-                <button class="btn" style="margin-top: 8px; background: #ffc107; color: #856404; font-size: 11px;" onclick="exportApiKeysConfig()">📋 导出配置</button>
-            </div>
-        `;
-    } else if (storage && storage.has_unsaved_changes) {
-        storageHint = `
-            <div style="grid-column: 1 / -1; background: #fff3cd; border: 1px solid #ffc107; padding: 12px; border-radius: 8px; margin-bottom: 8px;">
-                <div style="font-weight: 600; color: #856404;">⚠️ 有未持久化的更改</div>
-                <div style="font-size: 12px; color: #856404;">请导出配置并更新环境变量 <code>API_KEYS_CONFIG</code></div>
-                <button class="btn" style="margin-top: 8px; background: #ffc107; color: #856404; font-size: 11px;" onclick="exportApiKeysConfig()">📋 导出配置</button>
+                <button class="btn" style="margin-top: 8px; background: #ffc107; color: #856404; font-size: 11px;" onclick="exportApiKeysConfig()">📋 导出配置到环境变量</button>
             </div>
         `;
     }

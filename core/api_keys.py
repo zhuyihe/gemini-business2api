@@ -28,15 +28,15 @@ if os.path.exists("/data"):
     # HF Spaces Pro - 有持久化存储
     API_KEYS_FILE = "/data/api_keys.json"
     API_USAGE_FILE = "/data/api_usage.json"
-    STORAGE_MODE = "file"
+    STORAGE_MODE = "persistent"  # 持久化存储
 else:
     API_KEYS_FILE = "./data/api_keys.json"
     API_USAGE_FILE = "./data/api_usage.json"
-    # 检查是否有环境变量配置（HF 免费版）
-    if os.getenv("API_KEYS_CONFIG"):
-        STORAGE_MODE = "env"  # 使用环境变量
+    # 检测是否在 HuggingFace Spaces 环境（通过 SPACE_ID 环境变量）
+    if os.getenv("SPACE_ID"):
+        STORAGE_MODE = "hf_free"  # HF 免费版，需要环境变量持久化
     else:
-        STORAGE_MODE = "file"  # 本地文件
+        STORAGE_MODE = "local"  # 本地开发，文件持久化
 
 # 确保目录存在
 os.makedirs(os.path.dirname(API_KEYS_FILE) if os.path.dirname(API_KEYS_FILE) else ".", exist_ok=True)
