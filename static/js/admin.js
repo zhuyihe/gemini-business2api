@@ -323,7 +323,7 @@ async function loadApiKeys() {
         const keysData = await handleApiResponse(keysResponse);
         const statsData = await handleApiResponse(statsResponse);
         
-        renderApiKeysSummary(statsData.data);
+        renderApiKeysSummary(statsData.data, statsData.storage);
         renderApiKeysList(keysData.keys);
     } catch (error) {
         console.error('加载 API Keys 失败:', error);
@@ -334,11 +334,34 @@ async function loadApiKeys() {
     }
 }
 
-function renderApiKeysSummary(stats) {
+function renderApiKeysSummary(stats, storage) {
     const container = document.getElementById('api-keys-summary');
     if (!container) return;
     
+    // 存储模式提示
+    let storageHint = '';
+    if (storage && storage.mode === 'env') {
+        storageHint = `
+            <div style="grid-column: 1 / -1; background: #fff3cd; border: 1px solid #ffc107; padding: 12px; border-radius: 8px; margin-bottom: 8px;">
+                <div style="font-weight: 600; color: #856404; margin-bottom: 4px;">⚠️ 免费版存储提示</div>
+                <div style="font-size: 12px; color: #856404;">
+                    当前使用环境变量存储 Keys。新增/删除 Key 后，请点击"导出配置"按钮，将配置复制到 HF Spaces 的 <code>API_KEYS_CONFIG</code> 环境变量中，否则重启后会丢失。
+                </div>
+                <button class="btn" style="margin-top: 8px; background: #ffc107; color: #856404; font-size: 11px;" onclick="exportApiKeysConfig()">📋 导出配置</button>
+            </div>
+        `;
+    } else if (storage && storage.has_unsaved_changes) {
+        storageHint = `
+            <div style="grid-column: 1 / -1; background: #fff3cd; border: 1px solid #ffc107; padding: 12px; border-radius: 8px; margin-bottom: 8px;">
+                <div style="font-weight: 600; color: #856404;">⚠️ 有未持久化的更改</div>
+                <div style="font-size: 12px; color: #856404;">请导出配置并更新环境变量 <code>API_KEYS_CONFIG</code></div>
+                <button class="btn" style="margin-top: 8px; background: #ffc107; color: #856404; font-size: 11px;" onclick="exportApiKeysConfig()">📋 导出配置</button>
+            </div>
+        `;
+    }
+    
     container.innerHTML = `
+        ${storageHint}
         <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 16px; border-radius: 12px; color: white;">
             <div style="font-size: 28px; font-weight: 700;">${stats.total_keys || 0}</div>
             <div style="font-size: 12px; opacity: 0.9;">API Keys</div>
@@ -603,6 +626,28 @@ async function showKeyDetail(key) {
 
 function closeKeyDetailModal() {
     document.getElementById('keyDetailModal').classList.remove('show');
+}
+
+async function exportApiKeysConfig() {
+    try {
+        const response = await fetch(`/${window.ADMIN_PATH}/api-keys-export`);
+        const result = await handleApiResponse(response);
+        
+        // 复制到剪贴板
+        await navigator.clipboard.writeText(result.config);
+        
+        alert('✅ 配置已复制到剪贴板！\n\n请到 HuggingFace Spaces → Settings → Repository secrets，\n添加或更新环境变量：\n\n名称: API_KEYS_CONFIG\n值: (粘贴刚才复制的内容)');
+    } catch (error) {
+        console.error('导出失败:', error);
+        // 降级方案：显示配置让用户手动复制
+        try {
+            const response = await fetch(`/${window.ADMIN_PATH}/api-keys-export`);
+            const result = await response.json();
+            prompt('复制以下配置到 HF Spaces 的 API_KEYS_CONFIG 环境变量:', result.config);
+        } catch (e) {
+            alert('导出失败: ' + error.message);
+        }
+    }
 }
 
 // 页面加载时初始化

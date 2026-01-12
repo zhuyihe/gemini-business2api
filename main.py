@@ -853,9 +853,18 @@ async def admin_get_api_key_usage(request: Request, key: str):
 @require_login()
 async def admin_get_api_keys_stats(request: Request):
     """获取所有 API Key 的汇总统计"""
-    from core.api_keys import get_total_usage_stats
+    from core.api_keys import get_total_usage_stats, get_storage_info
     stats = get_total_usage_stats()
-    return {"status": "success", "data": stats}
+    storage = get_storage_info()
+    return {"status": "success", "data": stats, "storage": storage}
+
+@app.get("/admin/api-keys-export")
+@require_login()
+async def admin_export_api_keys(request: Request):
+    """导出 API Keys 配置（用于环境变量）"""
+    from core.api_keys import export_keys_config
+    config_json = export_keys_config()
+    return {"status": "success", "config": config_json}
 
 # ---------- 系统设置 API ----------
 @app.get("/admin/settings")

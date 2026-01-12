@@ -1,25 +1,45 @@
 """
 API Key 管理模块
 支持生成、删除、验证多个 API Key，以及详细用量统计
+
+数据持久化策略：
+1. HF Spaces Pro: 使用 /data 目录持久化
+2. HF Spaces 免费版: 使用环境变量 API_KEYS_CONFIG 持久化（JSON格式）
+3. 本地开发: 使用 ./data 目录
+
+环境变量格式 (API_KEYS_CONFIG):
+[{"key": "sk-xxx", "note": "测试", "created_at": "2025-01-12 10:00:00"}]
+
+用量统计在免费版中不持久化（重启后清零），但 Keys 本身会保留
 """
 import json
 import os
 import secrets
 import string
+import logging
 from datetime import datetime, timedelta
 from typing import Optional, Dict, List
 from threading import Lock
 
+logger = logging.getLogger("gemini")
+
 # 数据文件路径
 if os.path.exists("/data"):
+    # HF Spaces Pro - 有持久化存储
     API_KEYS_FILE = "/data/api_keys.json"
     API_USAGE_FILE = "/data/api_usage.json"
+    STORAGE_MODE = "file"
 else:
     API_KEYS_FILE = "./data/api_keys.json"
     API_USAGE_FILE = "./data/api_usage.json"
+    # 检查是否有环境变量配置（HF 免费版）
+    if os.getenv("API_KEYS_CONFIG"):
+        STORAGE_MODE = "env"  # 使用环境变量
+    else:
+        STORAGE_MODE = "file"  # 本地文件
 
 # 确保目录存在
-os.makedirs(os.path.dirname(API_KEYS_FILE), exist_ok=True)
+os.makedirs(os.path.dirname(API_KEYS_FILE) if os.path.dirname(API_KEYS_FILE) else ".", exist_ok=True)
 
 # 线程锁
 _lock = Lock()
@@ -28,6 +48,9 @@ _usage_lock = Lock()
 # 内存缓存
 _api_keys: Dict[str, dict] = {}
 _api_usage: Dict[str, dict] = {}  # {key: {total, today, by_model, by_hour, recent_requests}}
+
+# 标记是否有未保存的更改（用于环境变量模式提示）
+_has_unsaved_changes = False
 
 
 def _generate_key(prefix: str = "sk-", length: int = 32) -> str:
@@ -43,8 +66,21 @@ def generate_preview_key() -> str:
 
 
 def _load_keys() -> Dict[str, dict]:
-    """从文件加载 API Keys"""
+    """从文件或环境变量加载 API Keys"""
     global _api_keys
+    
+    # 优先从环境变量加载（HF 免费版）
+    env_config = os.getenv("API_KEYS_CONFIG")
+    if env_config:
+        try:
+            keys_list = json.loads(env_config)
+            _api_keys = {k["key"]: k for k in keys_list if "key" in k}
+            logger.info(f"[API_KEYS] 从环境变量加载 {len(_api_keys)} 个 Key")
+            return _api_keys
+        except Exception as e:
+            logger.error(f"[API_KEYS] 环境变量解析失败: {e}")
+    
+    # 从文件加载
     try:
         if os.path.exists(API_KEYS_FILE):
             with open(API_KEYS_FILE, 'r', encoding='utf-8') as f:
@@ -72,11 +108,18 @@ def _load_usage() -> Dict[str, dict]:
 
 def _save_keys():
     """保存 API Keys 到文件"""
+    global _has_unsaved_changes
+    
+    # 如果是环境变量模式，标记有未保存的更改
+    if STORAGE_MODE == "env":
+        _has_unsaved_changes = True
+        # 仍然保存到文件（作为备份，但重启后会丢失）
+    
     try:
         with open(API_KEYS_FILE, 'w', encoding='utf-8') as f:
             json.dump(_api_keys, f, ensure_ascii=False, indent=2)
     except Exception as e:
-        print(f"[API_KEYS] 保存失败: {e}")
+        logger.error(f"[API_KEYS] 保存失败: {e}")
 
 
 def _save_usage():
@@ -85,7 +128,7 @@ def _save_usage():
         with open(API_USAGE_FILE, 'w', encoding='utf-8') as f:
             json.dump(_api_usage, f, ensure_ascii=False, indent=2)
     except Exception as e:
-        print(f"[API_USAGE] 保存失败: {e}")
+        logger.error(f"[API_USAGE] 保存失败: {e}")
 
 
 def _get_today_str() -> str:
@@ -114,10 +157,10 @@ def init_api_keys():
     """初始化加载 API Keys 和用量统计"""
     with _lock:
         _load_keys()
-        print(f"[API_KEYS] 已加载 {len(_api_keys)} 个 API Key")
+        logger.info(f"[API_KEYS] 已加载 {len(_api_keys)} 个 API Key (存储模式: {STORAGE_MODE})")
     with _usage_lock:
         _load_usage()
-        print(f"[API_USAGE] 已加载用量统计")
+        logger.info(f"[API_USAGE] 已加载用量统计")
 
 
 def create_api_key(note: str = "", created_by: str = "admin", custom_key: str = None) -> dict:
@@ -325,3 +368,24 @@ def get_total_usage_stats() -> dict:
             "today_requests": today_requests,
             "by_model": model_stats
         }
+
+
+def export_keys_config() -> str:
+    """
+    导出当前所有 Keys 为 JSON 字符串
+    用于复制到 HF Spaces 的环境变量 API_KEYS_CONFIG
+    """
+    with _lock:
+        keys_list = list(_api_keys.values())
+        return json.dumps(keys_list, ensure_ascii=False)
+
+
+def get_storage_info() -> dict:
+    """获取存储模式信息"""
+    return {
+        "mode": STORAGE_MODE,
+        "has_unsaved_changes": _has_unsaved_changes,
+        "keys_file": API_KEYS_FILE,
+        "usage_file": API_USAGE_FILE,
+        "hint": "env" if STORAGE_MODE == "env" else None
+    }
