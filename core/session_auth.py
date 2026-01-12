@@ -29,19 +29,42 @@ def logout_user(request: Request):
     request.session.clear()
 
 
-def require_login(redirect_to_login: bool = True):
+def require_login(redirect_to_login: bool = True, json_response: bool = None):
     """
     要求用户登录的装饰器
 
     Args:
         redirect_to_login: 未登录时是否重定向到登录页面（默认True）
                           False时返回404错误
+        json_response: 未登录时是否返回JSON错误（默认None，自动检测）
+                      如果请求Accept头包含application/json或路径以/api-keys开头，返回JSON
     """
     def decorator(func):
         @wraps(func)
         async def wrapper(*args, request: Request, **kwargs):
             if not is_logged_in(request):
-                if redirect_to_login:
+                # 检测是否应该返回JSON响应
+                should_return_json = json_response
+                if should_return_json is None:
+                    # 自动检测：检查Accept头或路径
+                    accept = request.headers.get("accept", "")
+                    path = request.url.path
+                    should_return_json = (
+                        "application/json" in accept or
+                        "/api-keys" in path or
+                        path.endswith("/accounts") or
+                        path.endswith("/settings") or
+                        path.endswith("/health")
+                    )
+                
+                if should_return_json:
+                    # 返回JSON错误响应
+                    from fastapi.responses import JSONResponse
+                    return JSONResponse(
+                        status_code=401,
+                        content={"detail": "未登录或会话已过期，请重新登录"}
+                    )
+                elif redirect_to_login:
                     # 构建登录页面URL（支持可选的PATH_PREFIX）
                     # 从请求路径中提取PATH_PREFIX（如果有）
                     path = request.url.path

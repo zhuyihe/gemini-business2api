@@ -47,6 +47,12 @@ async function handleApiResponse(response) {
         } catch {
             errorMsg = errorText;
         }
+        // 处理未登录/会话过期
+        if (response.status === 401) {
+            alert('会话已过期，请重新登录');
+            window.location.href = `/${window.ADMIN_PATH}/login`;
+            throw new Error('会话已过期');
+        }
         throw new Error(`HTTP ${response.status}: ${errorMsg}`);
     }
     return await response.json();
