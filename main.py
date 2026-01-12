@@ -574,12 +574,12 @@ class ChatRequest(BaseModel):
 class ResponsesInputItem(BaseModel):
     """Responses API 输入项"""
     role: str
-    content: Union[str, List[Dict[str, Any]]]
+    content: Union[str, List[Dict[str, Any]], Dict[str, Any]]  # 支持多种格式
 
 class ResponsesRequest(BaseModel):
     """OpenAI Responses API 请求格式"""
     model: str = "gemini-auto"
-    input: Union[str, List[ResponsesInputItem]]  # 支持字符串或消息数组
+    input: Union[str, List[ResponsesInputItem], List[Dict[str, Any]], Dict[str, Any]]  # 支持多种格式
     instructions: Optional[str] = None  # 系统指令
     stream: bool = False
     temperature: Optional[float] = 0.7
@@ -1208,14 +1208,80 @@ async def responses_impl(
     if req.instructions:
         messages.append(Message(role="system", content=req.instructions))
     
-    # 处理 input
+    # 处理 input - 支持多种格式
+    def extract_text_content(content):
+        """从各种 content 格式中提取文本"""
+        if isinstance(content, str):
+            return content
+        elif isinstance(content, list):
+            # [{"type": "input_text", "text": "..."}, ...]
+            texts = []
+            for item in content:
+                if isinstance(item, dict):
+                    if item.get("type") == "input_text" or item.get("type") == "text":
+                        texts.append(item.get("text", ""))
+                    elif "text" in item:
+                        texts.append(item["text"])
+            return " ".join(texts) if texts else str(content)
+        elif isinstance(content, dict):
+            # {"0": {"type": "input_text", "text": "..."}, "length": 1}
+            if "length" in content:
+                texts = []
+                for i in range(int(content.get("length", 0))):
+                    item = content.get(str(i), {})
+                    if isinstance(item, dict):
+                        if item.get("type") in ["input_text", "text"]:
+                            texts.append(item.get("text", ""))
+                        elif "text" in item:
+                            texts.append(item["text"])
+                return " ".join(texts) if texts else str(content)
+            elif "text" in content:
+                return content["text"]
+        return str(content)
+    
+    def normalize_role(role: str) -> str:
+        """标准化 role 名称"""
+        role_map = {
+            "developer": "system",
+            "system": "system",
+            "user": "user",
+            "assistant": "assistant",
+            "model": "assistant"
+        }
+        return role_map.get(role.lower(), role)
+    
     if isinstance(req.input, str):
         # 简单字符串输入
         messages.append(Message(role="user", content=req.input))
-    else:
+    elif isinstance(req.input, dict):
+        # 对象格式: {"0": {...}, "1": {...}, "length": 2}
+        if "length" in req.input:
+            for i in range(int(req.input.get("length", 0))):
+                item = req.input.get(str(i), {})
+                if isinstance(item, dict) and "role" in item:
+                    role = normalize_role(item.get("role", "user"))
+                    content = extract_text_content(item.get("content", ""))
+                    messages.append(Message(role=role, content=content))
+        else:
+            # 单个消息对象
+            role = normalize_role(req.input.get("role", "user"))
+            content = extract_text_content(req.input.get("content", ""))
+            messages.append(Message(role=role, content=content))
+    elif isinstance(req.input, list):
         # 消息数组输入
         for item in req.input:
-            messages.append(Message(role=item.role, content=item.content))
+            if isinstance(item, dict):
+                role = normalize_role(item.get("role", "user"))
+                content = extract_text_content(item.get("content", ""))
+                messages.append(Message(role=role, content=content))
+            elif hasattr(item, "role") and hasattr(item, "content"):
+                role = normalize_role(item.role)
+                content = extract_text_content(item.content)
+                messages.append(Message(role=role, content=content))
+    
+    # 确保至少有一条消息
+    if not messages:
+        messages.append(Message(role="user", content="hello"))
     
     # 创建 ChatRequest
     chat_req = ChatRequest(
