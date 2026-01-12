@@ -342,6 +342,10 @@ async def startup_event():
     global_stats = await load_stats()
     logger.info(f"[SYSTEM] 统计数据已加载: {global_stats['total_requests']} 次请求, {global_stats['total_visitors']} 位访客")
 
+    # 初始化 API Keys 管理
+    from core.api_keys import init_api_keys
+    init_api_keys()
+
     # 启动缓存清理任务
     asyncio.create_task(multi_account_mgr.start_background_cleanup())
     logger.info("[SYSTEM] 后台缓存清理任务已启动（间隔: 5分钟）")
@@ -794,6 +798,65 @@ async def admin_enable_account(request: Request, account_id: str):
         logger.error(f"[CONFIG] 启用账户失败: {str(e)}")
         raise HTTPException(500, f"启用失败: {str(e)}")
 
+# ---------- API Key 管理 ----------
+@app.get("/admin/api-keys")
+@require_login()
+async def admin_get_api_keys(request: Request):
+    """获取所有 API Keys"""
+    from core.api_keys import get_all_api_keys
+    keys = get_all_api_keys()
+    return {"total": len(keys), "keys": keys}
+
+@app.get("/admin/api-keys/generate-preview")
+@require_login()
+async def admin_generate_preview_key(request: Request):
+    """生成预览用的 Key（不保存）"""
+    from core.api_keys import generate_preview_key
+    key = generate_preview_key()
+    return {"status": "success", "key": key}
+
+@app.post("/admin/api-keys")
+@require_login()
+async def admin_create_api_key(request: Request, data: dict = Body(...)):
+    """创建新的 API Key"""
+    from core.api_keys import create_api_key
+    note = data.get("note", "")
+    custom_key = data.get("key", None)
+    try:
+        key_data = create_api_key(note=note, custom_key=custom_key)
+        logger.info(f"[API_KEY] 创建新 Key: {key_data['key'][:8]}**** 备注: {note}")
+        return {"status": "success", "data": key_data}
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+@app.delete("/admin/api-keys/{key}")
+@require_login()
+async def admin_delete_api_key(request: Request, key: str):
+    """删除 API Key"""
+    from core.api_keys import delete_api_key
+    if delete_api_key(key):
+        logger.info(f"[API_KEY] 删除 Key: {key[:8]}****")
+        return {"status": "success", "message": "API Key 已删除"}
+    raise HTTPException(404, "API Key 不存在")
+
+@app.get("/admin/api-keys/{key}/usage")
+@require_login()
+async def admin_get_api_key_usage(request: Request, key: str):
+    """获取单个 API Key 的详细用量"""
+    from core.api_keys import get_api_key_usage
+    usage = get_api_key_usage(key)
+    if usage:
+        return {"status": "success", "data": usage}
+    raise HTTPException(404, "API Key 不存在或无用量数据")
+
+@app.get("/admin/api-keys-stats")
+@require_login()
+async def admin_get_api_keys_stats(request: Request):
+    """获取所有 API Key 的汇总统计"""
+    from core.api_keys import get_total_usage_stats
+    stats = get_total_usage_stats()
+    return {"status": "success", "data": stats}
+
 # ---------- 系统设置 API ----------
 @app.get("/admin/settings")
 @require_login()
@@ -1095,7 +1158,11 @@ async def chat_impl(
 ):
     # 生成请求ID（最优先，用于所有日志追踪）
     request_id = str(uuid.uuid4())[:6]
-
+    
+    # 提取使用的 API Key（用于用量统计）
+    used_api_key = None
+    if authorization:
+        used_api_key = authorization[7:] if authorization.startswith("Bearer ") else authorization
     # 获取客户端IP（用于会话隔离）
     client_ip = request.headers.get("x-forwarded-for")
     if client_ip:
@@ -1271,6 +1338,11 @@ async def chat_impl(
                 account_manager.is_available = True
                 account_manager.error_count = 0
                 account_manager.conversation_count += 1  # 增加对话次数
+
+                # 记录 API Key 用量统计
+                if used_api_key and used_api_key != API_KEY:
+                    from core.api_keys import record_usage
+                    record_usage(used_api_key, model=req.model, success=True)
 
                 # 记录账号池状态（请求成功）
                 uptime_tracker.record_request("account_pool", True)

@@ -28,6 +28,7 @@
             <!-- Tabs Navigation -->
             <div class="tabs-nav">
                 <button class="tab-button active" onclick="switchTab('accounts')">📋 账户管理</button>
+                <button class="tab-button" onclick="switchTab('apikeys')">🔑 API Keys</button>
                 <button class="tab-button" onclick="switchTab('api')">📚 API文档</button>
                 <button class="tab-button" onclick="switchTab('config')">⚙️ 系统配置</button>
                 <button class="tab-button" onclick="switchTab('settings')">🔧 系统设置</button>
@@ -103,7 +104,30 @@
                 </div>
             </div>
 
-            <!-- Tab 2: API文档 -->
+            <!-- Tab 2: API Keys 管理 -->
+            <div id="tab-apikeys" class="tab-content">
+                <div class="section">
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
+                        <div>
+                            <div class="section-title" style="margin-bottom: 4px;">API Key 管理</div>
+                            <div style="color: #6b6b6b; font-size: 11px;">生成 API Key 分发给其他用户使用</div>
+                        </div>
+                        <button class="btn" onclick="showCreateKeyModal()">➕ 生成新 Key</button>
+                    </div>
+
+                    <!-- 汇总统计卡片 -->
+                    <div id="api-keys-summary" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-bottom: 20px;">
+                    </div>
+
+                    <div id="api-keys-list">
+                        <div style="text-align: center; padding: 40px; color: #86868b;">
+                            加载中...
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Tab 3: API文档 -->
             <div id="tab-api" class="tab-content">
                 <div class="section">
                     <div class="section-title">API 端点列表</div>
@@ -402,6 +426,94 @@
                             </div>
                         </div>
                     </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 创建 API Key 模态框 -->
+        <div id="createKeyModal" class="modal">
+            <div class="modal-content" style="max-width: 550px;">
+                <div class="modal-header">
+                    <div class="modal-title">生成新 API Key</div>
+                    <button class="modal-close" onclick="closeCreateKeyModal()">&times;</button>
+                </div>
+                <div class="modal-body">
+                    <div class="setting-item">
+                        <label>API Key（自动生成，可直接复制）</label>
+                        <div style="display: flex; gap: 8px;">
+                            <input type="text" id="pre-generated-key" readonly style="flex: 1; background: #f5f5f7; font-family: monospace;" />
+                            <button class="btn" onclick="copyPreGeneratedKey()" style="white-space: nowrap;">📋 复制</button>
+                            <button class="btn" onclick="regenerateKey()" style="white-space: nowrap;">🔄 换一个</button>
+                        </div>
+                    </div>
+                    <div class="setting-item" style="margin-top: 12px;">
+                        <label>备注（可选）</label>
+                        <input type="text" id="new-key-note" placeholder="如：分发给张三" />
+                    </div>
+                    <div style="margin-top: 12px; font-size: 12px; color: #6b6b6b;">
+                        💡 可以先复制 Key，再点击"确认生成"保存到系统
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button class="btn btn-secondary" onclick="closeCreateKeyModal()">取消</button>
+                    <button class="btn btn-primary" onclick="createApiKey()">确认生成</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- 显示新 Key 模态框 -->
+        <div id="showKeyModal" class="modal">
+            <div class="modal-content" style="max-width: 600px;">
+                <div class="modal-header">
+                    <div class="modal-title">✅ API Key 已生成</div>
+                    <button class="modal-close" onclick="closeShowKeyModal()">&times;</button>
+                </div>
+                <div class="modal-body">
+                    <div style="background: #f5f5f7; padding: 16px; border-radius: 8px; margin-bottom: 12px;">
+                        <div style="font-size: 11px; color: #6b6b6b; margin-bottom: 8px;">你的 API Key</div>
+                        <div style="display: flex; gap: 8px; align-items: center;">
+                            <code id="new-key-display" style="flex: 1; font-size: 14px; word-break: break-all;"></code>
+                            <button class="btn" onclick="copyNewKey()">📋 复制</button>
+                        </div>
+                    </div>
+                    <div style="color: #ff3b30; font-size: 12px;">
+                        ⚠️ 请立即复制保存！关闭后将无法再次查看完整 Key。
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button class="btn btn-primary" onclick="closeShowKeyModal()">我已保存</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- API Key 用量详情模态框 -->
+        <div id="keyDetailModal" class="modal">
+            <div class="modal-content" style="max-width: 700px;">
+                <div class="modal-header">
+                    <div class="modal-title">📊 API Key 用量详情</div>
+                    <button class="modal-close" onclick="closeKeyDetailModal()">&times;</button>
+                </div>
+                <div class="modal-body" id="keyDetailContent">
+                    <div style="text-align: center; padding: 40px; color: #86868b;">加载中...</div>
+                </div>
+                <div class="modal-footer">
+                    <button class="btn btn-primary" onclick="closeKeyDetailModal()">关闭</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- 用量详情模态框 -->
+        <div id="usageModal" class="modal">
+            <div class="modal-content" style="max-width: 700px;">
+                <div class="modal-header">
+                    <div class="modal-title">📊 用量详情</div>
+                    <button class="modal-close" onclick="closeUsageModal()">&times;</button>
+                </div>
+                <div class="modal-body" id="usage-modal-content">
+                    <div style="text-align: center; padding: 40px; color: #86868b;">加载中...</div>
+                </div>
+                <div class="modal-footer">
+                    <button class="btn btn-primary" onclick="closeUsageModal()">关闭</button>
                 </div>
             </div>
         </div>
