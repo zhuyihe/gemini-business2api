@@ -48,3 +48,4 @@ logs/
 Thumbs.db
 
 gemini-bsreg/
+.ace-tool/
