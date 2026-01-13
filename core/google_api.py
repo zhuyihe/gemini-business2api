@@ -69,8 +69,9 @@ async def make_request_with_jwt_retry(
     headers = get_common_headers(jwt, user_agent)
 
     # 合并用户提供的headers（如果有）
-    if "headers" in kwargs:
-        headers.update(kwargs.pop("headers"))
+    extra_headers = kwargs.pop("headers", None)
+    if extra_headers:
+        headers.update(extra_headers)
 
     # 发起请求
     if method.upper() == "GET":
@@ -84,8 +85,8 @@ async def make_request_with_jwt_retry(
     if resp.status_code == 401:
         jwt = await account_mgr.get_jwt(request_id)
         headers = get_common_headers(jwt, user_agent)
-        if "headers" in kwargs:
-            headers.update(kwargs["headers"])
+        if extra_headers:
+            headers.update(extra_headers)
 
         if method.upper() == "GET":
             resp = await http_client.get(url, headers=headers, **kwargs)
@@ -252,10 +253,9 @@ async def download_image_with_jwt(
 
     for attempt in range(max_retries):
         try:
-            # 3分钟超时（180秒）
-            async with asyncio.timeout(180):
-                # 使用通用JWT刷新函数
-                resp = await make_request_with_jwt_retry(
+            # 3分钟超时（180秒）- 使用 wait_for 兼容 Python 3.10
+            resp = await asyncio.wait_for(
+                make_request_with_jwt_retry(
                     account_mgr,
                     "GET",
                     url,
@@ -263,11 +263,13 @@ async def download_image_with_jwt(
                     user_agent,
                     request_id,
                     follow_redirects=True
-                )
+                ),
+                timeout=180
+            )
 
-                resp.raise_for_status()
-                logger.info(f"[IMAGE] [{account_mgr.config.account_id}] [req_{request_id}] 图片下载成功: {file_id[:8]}... ({len(resp.content)} bytes)")
-                return resp.content
+            resp.raise_for_status()
+            logger.info(f"[IMAGE] [{account_mgr.config.account_id}] [req_{request_id}] 图片下载成功: {file_id[:8]}... ({len(resp.content)} bytes)")
+            return resp.content
 
         except asyncio.TimeoutError:
             logger.warning(f"[IMAGE] [{account_mgr.config.account_id}] [req_{request_id}] 图片下载超时 (尝试 {attempt + 1}/{max_retries}): {file_id[:8]}...")
