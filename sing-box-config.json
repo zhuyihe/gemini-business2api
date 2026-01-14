@@ -1,0 +1,60 @@
+{
+  "log": {
+    "level": "info",
+    "timestamp": true
+  },
+  "inbounds": [
+    {
+      "type": "http",
+      "tag": "http-in",
+      "listen": "127.0.0.1",
+      "listen_port": 7890
+    }
+  ],
+  "outbounds": [
+    {
+      "type": "hysteria2",
+      "tag": "hysteria2-node",
+      "server": "38.190.133.136",
+      "server_port": 25769,
+      "password": "da6f0e48-0f27-4a41-b2f1-9eb6e54c5f7a",
+      "tls": {
+        "enabled": true,
+        "server_name": "www.bing.com",
+        "insecure": true
+      }
+    },
+    {
+      "type": "vless",
+      "tag": "vless-argo",
+      "server": "saas.sin.fan",
+      "server_port": 443,
+      "uuid": "da6f0e48-0f27-4a41-b2f1-9eb6e54c5f7a",
+      "tls": {
+        "enabled": true,
+        "server_name": "exactly-demonstrated-demonstration-extent.trycloudflare.com"
+      },
+      "transport": {
+        "type": "ws",
+        "path": "/da6f0e48-0f27-4a41-b2f1-9eb6e54c5f7a-vless",
+        "headers": {
+          "Host": "exactly-demonstrated-demonstration-extent.trycloudflare.com"
+        }
+      }
+    },
+    {
+      "type": "urltest",
+      "tag": "auto",
+      "outbounds": ["hysteria2-node", "vless-argo"],
+      "url": "https://www.gstatic.com/generate_204",
+      "interval": "5m"
+    },
+    {
+      "type": "direct",
+      "tag": "direct"
+    }
+  ],
+  "route": {
+    "final": "auto"
+  }
+}
