@@ -38,7 +38,7 @@ where uv >nul 2>nul
 if %errorlevel% neq 0 (
     echo [INFO] uv not found, installing...
     REM Install uv using pipx or pip
-    pipx install uv 2>nul
+    pipx install uv 2>nul 
     if %errorlevel% neq 0 (
         pip install --user uv 2>nul
         if %errorlevel% neq 0 (
