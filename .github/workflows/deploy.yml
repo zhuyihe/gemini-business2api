@@ -1,0 +1,92 @@
+name: Deploy to Server with Docker Compose
+
+on:
+  push:
+    branches:
+      - main  # 推送到 main 分支时自动部署
+  workflow_dispatch:  # 允许手动触发部署
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Deploy to Server via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          port: ${{ secrets.SERVER_PORT || 22 }}
+          script: |
+            echo "=========================================="
+            echo "开始部署 Gemini Business2API"
+            echo "=========================================="
+            
+            # 设置项目路径
+            PROJECT_PATH="${{ secrets.DEPLOY_PATH }}"
+            if [ -z "$PROJECT_PATH" ]; then
+              PROJECT_PATH="/opt/gemini-business2api"
+            fi
+            
+            echo "项目路径: $PROJECT_PATH"
+            
+            # 如果目录不存在，先克隆仓库
+            if [ ! -d "$PROJECT_PATH" ]; then
+              echo "目录不存在，正在克隆仓库..."
+              sudo mkdir -p $(dirname "$PROJECT_PATH")
+              sudo git clone ${{ github.server_url }}/${{ github.repository }} "$PROJECT_PATH"
+              sudo chown -R $USER:$USER "$PROJECT_PATH"
+            fi
+            
+            # 进入项目目录
+            cd "$PROJECT_PATH"
+            
+            # 拉取最新代码
+            echo "拉取最新代码..."
+            git fetch origin
+            git reset --hard origin/main
+            
+            # 确保 .env 文件存在
+            if [ ! -f .env ]; then
+              echo "创建 .env 文件..."
+              cp .env.example .env
+              echo "⚠️  请手动编辑 .env 文件设置 ADMIN_KEY"
+            fi
+            
+            # 停止旧容器
+            echo "停止旧容器..."
+            docker-compose down
+            
+            # 重新构建并启动（后台运行）
+            echo "构建并启动新容器..."
+            docker-compose up -d --build
+            
+            # 等待容器启动
+            echo "等待容器启动..."
+            sleep 5
+            
+            # 清理旧镜像
+            echo "清理旧镜像..."
+            docker image prune -f
+            
+            # 查看运行状态
+            echo "=========================================="
+            echo "部署完成！容器状态："
+            echo "=========================================="
+            docker-compose ps
+            
+            echo ""
+            echo "=========================================="
+            echo "最近日志："
+            echo "=========================================="
+            docker-compose logs --tail=30
+            
+            echo ""
+            echo "=========================================="
+            echo "✅ 部署成功！"
+            echo "访问地址: http://$(curl -s ifconfig.me):7860"
+            echo "=========================================="
