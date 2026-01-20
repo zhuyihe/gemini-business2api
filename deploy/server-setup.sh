@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Gemini Business2API 服务器快速配置脚本
-# 用于首次在服务器上配置部署环境
+# 用于首次在服务器上配置部署环境 
 
 set -e
 
