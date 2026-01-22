@@ -1,6 +1,4 @@
 <template>
-  <div class="space-y-8">
-﻿<template>
   <div class="space-y-8 relative">
     <!-- 全局加载遮罩 -->
     <Teleport to="body">

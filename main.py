@@ -235,6 +235,17 @@ logging.basicConfig(
 )
 logger = logging.getLogger("gemini")
 
+# ---------- Linux zombie process reaper ----------
+# DrissionPage / Chromium may spawn subprocesses that exit without being waited on,
+# which can accumulate as zombies (<defunct>) in long-running services.
+try:
+    from core.child_reaper import install_child_reaper
+
+    install_child_reaper(log=lambda m: logger.warning(m))
+except Exception:
+    # Never fail startup due to optional process reaper.
+    pass
+
 # 添加内存日志处理器
 memory_handler = MemoryLogHandler()
 memory_handler.setFormatter(logging.Formatter("%(asctime)s | %(levelname)s | %(message)s", datefmt="%H:%M:%S"))
