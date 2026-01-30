@@ -1,0 +1,143 @@
+name: Deploy to Server with Docker Compose
+
+on:
+  push:
+    branches:
+      - main  # 推送到 main 分支时自动部署
+  workflow_dispatch:  # 允许手动触发部署
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Deploy to Server via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          port: ${{ secrets.SERVER_PORT || 22 }}
+          envs: ADMIN_KEY,SESSION_SECRET_KEY,DATABASE_URL
+        env:
+          ADMIN_KEY: ${{ secrets.ADMIN_KEY }}
+          SESSION_SECRET_KEY: ${{ secrets.SESSION_SECRET_KEY }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        script: |
+            echo "=========================================="
+            echo "开始部署 Gemini Business2API"
+            echo "=========================================="
+
+            # 设置项目路径
+            PROJECT_PATH="${{ secrets.DEPLOY_PATH }}"
+            if [ -z "$PROJECT_PATH" ]; then
+              PROJECT_PATH="/opt/gemini-business2api"
+            fi
+
+            echo "项目路径: $PROJECT_PATH"
+
+            # 如果目录不存在，先克隆仓库
+            if [ ! -d "$PROJECT_PATH" ]; then
+              echo "目录不存在，正在克隆仓库..."
+              sudo mkdir -p $(dirname "$PROJECT_PATH")
+              sudo git clone ${{ github.server_url }}/${{ github.repository }} "$PROJECT_PATH"
+              sudo chown -R $USER:$USER "$PROJECT_PATH"
+            fi
+
+            # 进入项目目录
+            cd "$PROJECT_PATH"
+
+            # 拉取最新代码
+            echo "拉取最新代码..."
+            git fetch origin
+            git reset --hard origin/main
+
+            # 配置 .env 文件
+            echo "配置环境变量..."
+            if [ ! -f .env ]; then
+              echo "创建 .env 文件..."
+              cp .env.example .env
+            else
+              echo "备份现有 .env 文件..."
+              cp .env .env.backup.$(date +%Y%m%d_%H%M%S)
+            fi
+
+            # 更新或添加 ADMIN_KEY
+            if [ -n "$ADMIN_KEY" ]; then
+              if grep -q "^ADMIN_KEY=" .env; then
+                sed -i "s|^ADMIN_KEY=.*|ADMIN_KEY=$ADMIN_KEY|" .env
+                echo "✓ 已更新 ADMIN_KEY"
+              else
+                echo "" >> .env
+                echo "# 管理员密钥（自动配置）" >> .env
+                echo "ADMIN_KEY=$ADMIN_KEY" >> .env
+                echo "✓ 已添加 ADMIN_KEY"
+              fi
+            else
+              echo "⚠️  警告: 未设置 ADMIN_KEY，请在 GitHub Secrets 中配置"
+            fi
+
+            # 更新或添加 SESSION_SECRET_KEY
+            if [ -n "$SESSION_SECRET_KEY" ]; then
+              if grep -q "^SESSION_SECRET_KEY=" .env; then
+                sed -i "s|^SESSION_SECRET_KEY=.*|SESSION_SECRET_KEY=$SESSION_SECRET_KEY|" .env
+                echo "✓ 已更新 SESSION_SECRET_KEY"
+              else
+                echo "" >> .env
+                echo "# 会话密钥（自动配置，防止重启后会话失效）" >> .env
+                echo "SESSION_SECRET_KEY=$SESSION_SECRET_KEY" >> .env
+                echo "✓ 已添加 SESSION_SECRET_KEY"
+              fi
+            else
+              echo "⚠️  警告: 未设置 SESSION_SECRET_KEY，会话将在重启后失效"
+              echo "⚠️  建议在 GitHub Secrets 中添加 SESSION_SECRET_KEY"
+            fi
+
+            # 更新或添加 DATABASE_URL（可选）
+            if [ -n "$DATABASE_URL" ]; then
+              if grep -q "^DATABASE_URL=" .env; then
+                sed -i "s|^DATABASE_URL=.*|DATABASE_URL=$DATABASE_URL|" .env
+                echo "✓ 已更新 DATABASE_URL"
+              else
+                echo "" >> .env
+                echo "# 数据库连接串（自动配置）" >> .env
+                echo "DATABASE_URL=$DATABASE_URL" >> .env
+                echo "✓ 已添加 DATABASE_URL"
+              fi
+            fi
+
+            echo "环境变量配置完成"
+            
+            # 停止旧容器
+            echo "停止旧容器..."
+            docker-compose down
+            
+            # 重新构建并启动（后台运行）
+            echo "构建并启动新容器..."
+            docker-compose up -d --build
+            
+            # 等待容器启动
+            echo "等待容器启动..."
+            sleep 5
+            
+            # 清理旧镜像
+            echo "清理旧镜像..."
+            docker image prune -f
+            
+            # 查看运行状态
+            echo "=========================================="
+            echo "部署完成！容器状态："
+            echo "=========================================="
+            docker-compose ps
+            
+            echo ""
+            echo "=========================================="
+            echo "最近日志："
+            echo "=========================================="
+            docker-compose logs --tail=30
+            
+            echo ""
+            echo "=========================================="
+            echo "✅ 部署成功！"
+            echo "访问地址: http://$(curl -s ifconfig.me):7860"
+            echo "=========================================="
