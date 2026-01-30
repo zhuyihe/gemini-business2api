@@ -1,4 +1,4 @@
-<template>
+﻿<template>
   <span
     ref="triggerRef"
     class="inline-flex cursor-pointer rounded-full px-3 py-1 text-xs font-medium transition-colors"
@@ -33,7 +33,11 @@
           class="absolute left-1/2 top-full h-0 w-0 -translate-x-1/2 -translate-y-px border-x-[5px] border-t-[5px] border-x-transparent border-t-card"
         ></span>
 
-        <div class="text-xs font-medium text-foreground mb-2">配额详情</div>
+        <div class="mb-2 text-xs font-medium text-foreground">配额详情</div>
+        <div class="mb-2 flex items-center justify-between text-[11px] text-muted-foreground">
+          <span>受限 {{ quotaStatus.limited_count }}/{{ quotaStatus.total_count }}</span>
+          <span v-if="quotaStatus.is_expired" class="text-red-500">账号已过期/禁用</span>
+        </div>
         <div class="space-y-2">
           <div v-for="(status, type) in quotaStatus.quotas" :key="type" class="flex items-center justify-between text-xs">
             <span class="flex items-center gap-1.5">
@@ -41,7 +45,7 @@
               <span class="text-muted-foreground">{{ getQuotaName(type) }}</span>
             </span>
             <span :class="getStatusClass(status)" class="text-xs font-medium">
-              {{ getStatusText(status) }}
+              {{ getStatusText(status, type) }}
             </span>
           </div>
         </div>
@@ -121,30 +125,28 @@ const badgeText = computed(() => {
   const { limited_count, total_count, quotas, is_expired } = props.quotaStatus
 
   if (limited_count === 0) {
-    return '✓ 可用'
+    return '✅ 全部可用'
   }
 
-  // 过期账户显示"已过期"
   if (is_expired && limited_count === total_count) {
-    return '✗ 已过期'
+    return '⛔ 已过期/禁用'
   }
 
   if (limited_count === total_count) {
-    return '✗ 全部限流'
+    return '⛔ 全部冷却'
   }
 
-  // 部分限流：显示具体哪些受限
   const limitedTypes: string[] = []
-  if (!quotas.text.available) limitedTypes.push('💬')
-  if (!quotas.images.available) limitedTypes.push('🎨')
-  if (!quotas.videos.available) limitedTypes.push('🎬')
+  if (!quotas.text.available) limitedTypes.push(formatLimitedType('text', quotas.text.remaining_seconds))
+  if (!quotas.images.available) limitedTypes.push(formatLimitedType('images', quotas.images.remaining_seconds))
+  if (!quotas.videos.available) limitedTypes.push(formatLimitedType('videos', quotas.videos.remaining_seconds))
 
-  return limitedTypes.join(' ') + ' 限流'
+  return `冷却 ${limitedTypes.join(' / ')}`
 })
 
 const getQuotaIcon = (type: string) => {
   const icons: Record<string, string> = { text: '💬', images: '🎨', videos: '🎬' }
-  return icons[type] || '❓'
+  return icons[type] || '❔'
 }
 
 const getQuotaName = (type: string) => {
@@ -156,22 +158,19 @@ const getStatusClass = (status: QuotaStatus) => {
   if (status.available) {
     return 'text-green-500 font-medium'
   }
-  // 有倒计时是限流（琥珀色），没有倒计时是过期（红色）
   return status.remaining_seconds ? 'text-amber-500 font-medium' : 'text-red-500 font-medium'
 }
 
-const getStatusText = (status: QuotaStatus) => {
+const getStatusText = (status: QuotaStatus, type?: string) => {
   if (status.available) {
-    return '✓ 正常'
+    return '✅ 正常'
   }
 
-  // 有倒计时显示倒计时，否则显示"已过期"
   if (status.remaining_seconds) {
     return `⏳ ${formatTime(status.remaining_seconds)}`
   }
 
-  // 过期账户（没有 remaining_seconds）
-  return '✗ 已过期'
+  return type ? `⛔ ${getQuotaName(type)}不可用` : '⛔ 已过期'
 }
 
 const formatTime = (seconds: number) => {
@@ -181,5 +180,13 @@ const formatTime = (seconds: number) => {
     return `${h}h ${m}m`
   }
   return `${m}m`
+}
+
+const formatLimitedType = (type: string, remaining?: number) => {
+  const icon = getQuotaIcon(type)
+  if (remaining) {
+    return `${icon}${formatTime(remaining)}`
+  }
+  return `${icon}不可用`
 }
 </script>

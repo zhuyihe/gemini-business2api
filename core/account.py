@@ -11,7 +11,7 @@ import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Dict, List, Optional, TYPE_CHECKING
+from typing import Dict, List, Optional, TYPE_CHECKING, Iterable
 
 from fastapi import HTTPException
 
@@ -88,6 +88,19 @@ class AccountConfig:
         return remaining <= 0
 
 
+@dataclass(frozen=True)
+class CooldownConfig:
+    text: int
+    images: int
+    videos: int
+
+
+@dataclass(frozen=True)
+class RetryPolicy:
+    account_failure_threshold: int
+    cooldowns: CooldownConfig
+
+
 def format_account_expiration(remaining_hours: Optional[float]) -> tuple:
     """
     格式化账户过期时间显示（基于12小时过期周期）
@@ -111,19 +124,30 @@ def format_account_expiration(remaining_hours: Optional[float]) -> tuple:
 
 class AccountManager:
     """单个账户管理器"""
-    def __init__(self, config: AccountConfig, http_client, user_agent: str, account_failure_threshold: int, rate_limit_cooldown_seconds: int):
+    def __init__(
+        self,
+        config: AccountConfig,
+        http_client,
+        user_agent: str,
+        retry_policy: RetryPolicy,
+    ):
         self.config = config
         self.http_client = http_client
         self.user_agent = user_agent
-        self.account_failure_threshold = account_failure_threshold
-        self.rate_limit_cooldown_seconds = rate_limit_cooldown_seconds
+        self.account_failure_threshold = retry_policy.account_failure_threshold
+        # Global cooldown is defined by text cooldown.
+        self.rate_limit_cooldown_seconds = retry_policy.cooldowns.text
+        self.text_rate_limit_cooldown_seconds = retry_policy.cooldowns.text
+        self.images_rate_limit_cooldown_seconds = retry_policy.cooldowns.images
+        self.videos_rate_limit_cooldown_seconds = retry_policy.cooldowns.videos
         self.jwt_manager: Optional['JWTManager'] = None  # 延迟初始化
         self.is_available = True
         self.last_error_time = 0.0
         self.last_cooldown_time = 0.0  # 冷却时间戳（401/403/429错误）
         self.quota_cooldowns: Dict[str, float] = {}  # 按配额类型的冷却时间戳 {"text": timestamp, "images": timestamp, "videos": timestamp}
         self.error_count = 0
-        self.conversation_count = 0  # 累计对话次数（用于统计展示）
+        self.conversation_count = 0  # 累计成功次数（用于统计展示）
+        self.failure_count = 0  # 累计失败次数（用于统计展示）
         self.session_usage_count = 0  # 本次启动后使用次数（用于均衡轮询）
 
     def handle_non_http_error(self, error_context: str = "", request_id: str = "") -> None:
@@ -148,6 +172,22 @@ class AccountManager:
                 f"[ACCOUNT] [{self.config.account_id}] {req_tag}"
                 f"{error_context}失败({self.error_count}/{self.account_failure_threshold})"
             )
+
+    def _get_quota_cooldown_seconds(self, quota_type: Optional[str]) -> int:
+        if quota_type == "images":
+            return self.images_rate_limit_cooldown_seconds
+        if quota_type == "videos":
+            return self.videos_rate_limit_cooldown_seconds
+        return self.text_rate_limit_cooldown_seconds
+
+    def apply_retry_policy(self, retry_policy: RetryPolicy) -> None:
+        """Apply updated retry policy to this account manager."""
+        self.account_failure_threshold = retry_policy.account_failure_threshold
+        # Global cooldown is defined by text cooldown.
+        self.rate_limit_cooldown_seconds = retry_policy.cooldowns.text
+        self.text_rate_limit_cooldown_seconds = retry_policy.cooldowns.text
+        self.images_rate_limit_cooldown_seconds = retry_policy.cooldowns.images
+        self.videos_rate_limit_cooldown_seconds = retry_policy.cooldowns.videos
 
     def handle_http_error(self, status_code: int, error_detail: str = "", request_id: str = "", quota_type: Optional[str] = None) -> None:
         """
@@ -181,9 +221,10 @@ class AccountManager:
             if quota_type and quota_type in QUOTA_TYPES:
                 # 按配额类型冷却（不影响账户整体可用性）
                 self.quota_cooldowns[quota_type] = time.time()
+                cooldown_seconds = self._get_quota_cooldown_seconds(quota_type)
                 logger.warning(
                     f"[ACCOUNT] [{self.config.account_id}] {req_tag}"
-                    f"{QUOTA_TYPES[quota_type]}配额限流，将在{self.rate_limit_cooldown_seconds}秒后自动恢复"
+                    f"{QUOTA_TYPES[quota_type]}配额限流，将在{cooldown_seconds}秒后自动恢复"
                     f"{': ' + error_detail[:100] if error_detail else ''}"
                 )
             else:
@@ -225,6 +266,32 @@ class AccountManager:
                 f"HTTP {status_code}错误({self.error_count}/{self.account_failure_threshold})"
                 f"{': ' + error_detail[:100] if error_detail else ''}"
             )
+
+    def is_quota_available(self, quota_type: str) -> bool:
+        """检查指定配额是否可用（冷却中则不可用）。"""
+        if quota_type not in QUOTA_TYPES:
+            return True
+
+        cooldown_time = self.quota_cooldowns.get(quota_type)
+        if not cooldown_time:
+            return True
+
+        elapsed = time.time() - cooldown_time
+        cooldown_seconds = self._get_quota_cooldown_seconds(quota_type)
+        if elapsed < cooldown_seconds:
+            return False
+
+        # 冷却已过期，清理
+        del self.quota_cooldowns[quota_type]
+        return True
+
+    def are_quotas_available(self, quota_types: Optional[Iterable[str]] = None) -> bool:
+        """检查多个配额类型是否都可用。"""
+        if not quota_types:
+            return True
+        if isinstance(quota_types, str):
+            quota_types = [quota_types]
+        return all(self.is_quota_available(qt) for qt in quota_types)
 
     async def get_jwt(self, request_id: str = "") -> str:
         """获取 JWT token (带错误处理)"""
@@ -333,10 +400,11 @@ class AccountManager:
         for quota_type in QUOTA_TYPES:
             if quota_type in self.quota_cooldowns:
                 cooldown_time = self.quota_cooldowns[quota_type]
-                # 检查冷却时间是否已过（使用统一的 rate_limit_cooldown_seconds）
+                # 检查冷却时间是否已过（按配额类型）
                 elapsed = current_time - cooldown_time
-                if elapsed < self.rate_limit_cooldown_seconds:
-                    remaining = int(self.rate_limit_cooldown_seconds - elapsed)
+                cooldown_seconds = self._get_quota_cooldown_seconds(quota_type)
+                if elapsed < cooldown_seconds:
+                    remaining = int(cooldown_seconds - elapsed)
                     quotas[quota_type] = {
                         "available": False,
                         "remaining_seconds": remaining
@@ -458,17 +526,31 @@ class MultiAccountManager:
             if account_mgr.jwt_manager is not None:
                 account_mgr.jwt_manager.http_client = http_client
 
-    def add_account(self, config: AccountConfig, http_client, user_agent: str, account_failure_threshold: int, rate_limit_cooldown_seconds: int, global_stats: dict):
+    def add_account(
+        self,
+        config: AccountConfig,
+        http_client,
+        user_agent: str,
+        retry_policy: RetryPolicy,
+        global_stats: dict,
+    ):
         """添加账户"""
-        manager = AccountManager(config, http_client, user_agent, account_failure_threshold, rate_limit_cooldown_seconds)
+        manager = AccountManager(config, http_client, user_agent, retry_policy)
         # 从统计数据加载对话次数
         if "account_conversations" in global_stats:
             manager.conversation_count = global_stats["account_conversations"].get(config.account_id, 0)
+        if "account_failures" in global_stats:
+            manager.failure_count = global_stats["account_failures"].get(config.account_id, 0)
         self.accounts[config.account_id] = manager
         self.account_list.append(config.account_id)
         logger.info(f"[MULTI] [ACCOUNT] 添加账户: {config.account_id}")
 
-    async def get_account(self, account_id: Optional[str] = None, request_id: str = "") -> AccountManager:
+    async def get_account(
+        self,
+        account_id: Optional[str] = None,
+        request_id: str = "",
+        required_quota_types: Optional[Iterable[str]] = None
+    ) -> AccountManager:
         """获取账户 - Round-Robin轮询"""
         req_tag = f"[req_{request_id}] " if request_id else ""
 
@@ -479,6 +561,8 @@ class MultiAccountManager:
             account = self.accounts[account_id]
             if not account.should_retry():
                 raise HTTPException(503, f"Account {account_id} temporarily unavailable")
+            if not account.are_quotas_available(required_quota_types):
+                raise HTTPException(503, f"Account {account_id} quota temporarily unavailable")
             return account
 
         # 筛选可用账户
@@ -486,7 +570,8 @@ class MultiAccountManager:
             acc for acc in self.accounts.values()
             if (acc.should_retry() and
                 not acc.config.is_expired() and
-                not acc.config.disabled)
+                not acc.config.disabled and
+                acc.are_quotas_available(required_quota_types))
         ]
 
         if not available_accounts:
@@ -569,8 +654,7 @@ def get_account_id(acc: dict, index: int) -> str:
 def load_multi_account_config(
     http_client,
     user_agent: str,
-    account_failure_threshold: int,
-    rate_limit_cooldown_seconds: int,
+    retry_policy: RetryPolicy,
     session_cache_ttl_seconds: int,
     global_stats: dict
 ) -> MultiAccountManager:
@@ -607,7 +691,7 @@ def load_multi_account_config(
         if is_expired:
             logger.warning(f"[CONFIG] 账户 {config.account_id} 已过期，仍加载用于展示")
 
-        manager.add_account(config, http_client, user_agent, account_failure_threshold, rate_limit_cooldown_seconds, global_stats)
+        manager.add_account(config, http_client, user_agent, retry_policy, global_stats)
         if is_expired:
             manager.accounts[config.account_id].is_available = False
 
@@ -622,44 +706,52 @@ def reload_accounts(
     multi_account_mgr: MultiAccountManager,
     http_client,
     user_agent: str,
-    account_failure_threshold: int,
-    rate_limit_cooldown_seconds: int,
+    retry_policy: RetryPolicy,
     session_cache_ttl_seconds: int,
     global_stats: dict
 ) -> MultiAccountManager:
-    """重新加载账户配置（重置所有错误状态，仅保留统计数据）"""
-    # 仅保存统计数据（conversation_count）
+    """Reload account config and preserve runtime cooldown/error state."""
+    # Preserve stats + runtime state to avoid clearing cooldowns on reload.
     old_stats = {}
     for account_id, account_mgr in multi_account_mgr.accounts.items():
         old_stats[account_id] = {
-            "conversation_count": account_mgr.conversation_count
+            "conversation_count": account_mgr.conversation_count,
+            "failure_count": account_mgr.failure_count,
+            "is_available": account_mgr.is_available,
+            "last_error_time": account_mgr.last_error_time,
+            "last_cooldown_time": account_mgr.last_cooldown_time,
+            "error_count": account_mgr.error_count,
+            "session_usage_count": account_mgr.session_usage_count,
+            "quota_cooldowns": dict(account_mgr.quota_cooldowns),
         }
 
-    # 清空会话缓存并重新加载配置
+    # Clear session cache and reload config.
     multi_account_mgr.global_session_cache.clear()
     new_mgr = load_multi_account_config(
         http_client,
         user_agent,
-        account_failure_threshold,
-        rate_limit_cooldown_seconds,
+        retry_policy,
         session_cache_ttl_seconds,
         global_stats
     )
 
-    # 仅恢复统计数据，错误状态全部重置
+    # Restore stats + runtime state.
     for account_id, stats in old_stats.items():
         if account_id in new_mgr.accounts:
             account_mgr = new_mgr.accounts[account_id]
             account_mgr.conversation_count = stats["conversation_count"]
-            # 确保错误状态已重置（虽然load_multi_account_config已经初始化，但显式确认）
-            account_mgr.is_available = True
-            account_mgr.last_error_time = 0.0
-            account_mgr.last_cooldown_time = 0.0
-            account_mgr.error_count = 0
-            account_mgr.session_usage_count = 0
-            logger.debug(f"[CONFIG] 账户 {account_id} 已刷新，错误状态已重置")
+            account_mgr.failure_count = stats.get("failure_count", 0)
+            account_mgr.is_available = stats.get("is_available", True)
+            account_mgr.last_error_time = stats.get("last_error_time", 0.0)
+            account_mgr.last_cooldown_time = stats.get("last_cooldown_time", 0.0)
+            account_mgr.error_count = stats.get("error_count", 0)
+            account_mgr.session_usage_count = stats.get("session_usage_count", 0)
+            account_mgr.quota_cooldowns = stats.get("quota_cooldowns", {})
+            logger.debug(f"[CONFIG] Account {account_id} refreshed; runtime state preserved")
 
-    logger.info(f"[CONFIG] 配置已重载，当前账户数: {len(new_mgr.accounts)}，所有错误状态已重置")
+    logger.info(
+        f"[CONFIG] Reloaded config; accounts={len(new_mgr.accounts)}; cooldown/error state preserved"
+    )
     return new_mgr
 
 
@@ -668,8 +760,7 @@ def update_accounts_config(
     multi_account_mgr: MultiAccountManager,
     http_client,
     user_agent: str,
-    account_failure_threshold: int,
-    rate_limit_cooldown_seconds: int,
+    retry_policy: RetryPolicy,
     session_cache_ttl_seconds: int,
     global_stats: dict
 ) -> MultiAccountManager:
@@ -679,8 +770,7 @@ def update_accounts_config(
         multi_account_mgr,
         http_client,
         user_agent,
-        account_failure_threshold,
-        rate_limit_cooldown_seconds,
+        retry_policy,
         session_cache_ttl_seconds,
         global_stats
     )
@@ -691,8 +781,7 @@ def delete_account(
     multi_account_mgr: MultiAccountManager,
     http_client,
     user_agent: str,
-    account_failure_threshold: int,
-    rate_limit_cooldown_seconds: int,
+    retry_policy: RetryPolicy,
     session_cache_ttl_seconds: int,
     global_stats: dict
 ) -> MultiAccountManager:
@@ -705,8 +794,7 @@ def delete_account(
             multi_account_mgr,
             http_client,
             user_agent,
-            account_failure_threshold,
-            rate_limit_cooldown_seconds,
+            retry_policy,
             session_cache_ttl_seconds,
             global_stats
         )
@@ -726,8 +814,7 @@ def delete_account(
         multi_account_mgr,
         http_client,
         user_agent,
-        account_failure_threshold,
-        rate_limit_cooldown_seconds,
+        retry_policy,
         session_cache_ttl_seconds,
         global_stats
     )
@@ -737,12 +824,6 @@ def update_account_disabled_status(
     account_id: str,
     disabled: bool,
     multi_account_mgr: MultiAccountManager,
-    http_client,
-    user_agent: str,
-    account_failure_threshold: int,
-    rate_limit_cooldown_seconds: int,
-    session_cache_ttl_seconds: int,
-    global_stats: dict
 ) -> MultiAccountManager:
     """更新账户的禁用状态（优化版：优先数据库直写）。"""
     if storage.is_database_enabled():
@@ -818,8 +899,7 @@ def bulk_delete_accounts(
     multi_account_mgr: MultiAccountManager,
     http_client,
     user_agent: str,
-    account_failure_threshold: int,
-    rate_limit_cooldown_seconds: int,
+    retry_policy: RetryPolicy,
     session_cache_ttl_seconds: int,
     global_stats: dict
 ) -> tuple[MultiAccountManager, int, list[str]]:
@@ -834,8 +914,7 @@ def bulk_delete_accounts(
                 multi_account_mgr,
                 http_client,
                 user_agent,
-                account_failure_threshold,
-                rate_limit_cooldown_seconds,
+                retry_policy,
                 session_cache_ttl_seconds,
                 global_stats
             )
@@ -866,8 +945,7 @@ def bulk_delete_accounts(
             multi_account_mgr,
             http_client,
             user_agent,
-            account_failure_threshold,
-            rate_limit_cooldown_seconds,
+            retry_policy,
             session_cache_ttl_seconds,
             global_stats
         )
@@ -875,5 +953,3 @@ def bulk_delete_accounts(
     success_count = len(deleted_ids)
     logger.info(f"[CONFIG] 批量删除 {success_count}/{len(account_ids)} 个账户")
     return multi_account_mgr, success_count, errors
-
-

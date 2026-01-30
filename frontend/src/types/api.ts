@@ -24,6 +24,7 @@ export interface AdminAccount {
   remaining_display: string
   is_available: boolean
   error_count: number
+  failure_count: number
   disabled: boolean
   cooldown_seconds: number
   cooldown_reason: string | null
@@ -100,7 +101,9 @@ export interface Settings {
     max_request_retries: number
     max_account_switch_tries: number
     account_failure_threshold: number
-    rate_limit_cooldown_seconds: number
+    text_rate_limit_cooldown_seconds: number
+    images_rate_limit_cooldown_seconds: number
+    videos_rate_limit_cooldown_seconds: number
     session_cache_ttl_seconds: number
     auto_refresh_accounts_seconds: number
     scheduled_refresh_enabled?: boolean
@@ -191,6 +194,8 @@ export interface AdminStats {
   failed_accounts: number
   rate_limited_accounts: number
   idle_accounts: number
+  success_count?: number
+  failed_count?: number
   trend: AdminStatsTrend
 }
 

@@ -283,10 +283,10 @@
             </div>
             <div>
               <p>失败数</p>
-              <p class="mt-1 text-sm font-semibold text-foreground">{{ account.error_count }}</p>
+              <p class="mt-1 text-sm font-semibold text-foreground">{{ account.failure_count }}</p>
             </div>
             <div>
-              <p>会话数</p>
+              <p>成功数</p>
               <p class="mt-1 text-sm font-semibold text-foreground">{{ account.conversation_count }}</p>
             </div>
           </div>
@@ -350,7 +350,7 @@
               <th class="py-3 pr-6">配额</th>
               <th class="py-3 pr-6">冷却</th>
               <th class="py-3 pr-6">失败数</th>
-              <th class="py-3 pr-6">会话数</th>
+              <th class="py-3 pr-6">成功数</th>
               <th class="py-3 text-right">操作</th>
             </tr>
           </thead>
@@ -405,7 +405,7 @@
                 </span>
               </td>
               <td class="py-4 pr-6 text-xs text-muted-foreground">
-                {{ account.error_count }}
+                {{ account.failure_count }}
               </td>
               <td class="py-4 pr-6 text-xs text-muted-foreground">
                 {{ account.conversation_count }}
@@ -1227,6 +1227,22 @@ const REGISTER_CLEAR_KEY = 'accounts-register-log-clear'
 const LOGIN_CLEAR_KEY = 'accounts-login-log-clear'
 const REGISTER_DISMISS_KEY = 'accounts-register-task-dismissed'
 const LOGIN_DISMISS_KEY = 'accounts-login-task-dismissed'
+const REGISTER_CLEARED_KEY = 'accounts-register-task-cleared'
+const LOGIN_CLEARED_KEY = 'accounts-login-task-cleared'
+
+type TaskKind = 'register' | 'login'
+const TASK_KEYS = {
+  register: {
+    clearKey: REGISTER_CLEAR_KEY,
+    dismissKey: REGISTER_DISMISS_KEY,
+    clearedKey: REGISTER_CLEARED_KEY,
+  },
+  login: {
+    clearKey: LOGIN_CLEAR_KEY,
+    dismissKey: LOGIN_DISMISS_KEY,
+    clearedKey: LOGIN_CLEARED_KEY,
+  },
+} as const
 const editForm = ref<AccountConfigItem>({
   id: '',
   secure_c_ses: '',
@@ -1347,13 +1363,122 @@ const writeDismissedTaskId = (key: string, taskId: string | null) => {
   writeDismissedTaskMeta(key, { id: taskId })
 }
 
-const isTaskDismissed = (task: { id?: string; created_at?: number } | null | undefined, meta: DismissedTaskMeta) => {
+const isTaskMetaMatch = (task: { id?: string; created_at?: number } | null | undefined, meta: DismissedTaskMeta) => {
   if (!task || !meta) return false
   if (meta.id && task.id && task.id === meta.id) return true
   if (typeof meta.created_at === 'number' && typeof task.created_at === 'number' && task.created_at === meta.created_at) {
     return true
   }
   return false
+}
+
+const isTaskDismissed = (task: { id?: string; created_at?: number } | null | undefined, meta: DismissedTaskMeta) =>
+  isTaskMetaMatch(task, meta)
+
+const readClearedTaskMeta = (key: string): DismissedTaskMeta => readDismissedTaskMeta(key)
+const writeClearedTaskMeta = (key: string, meta: DismissedTaskMeta) => writeDismissedTaskMeta(key, meta)
+
+const isTaskActive = (task: RegisterTask | LoginTask | null | undefined) => {
+  const status = task?.status
+  return status === 'running' || status === 'pending'
+}
+
+const getTaskByKind = (kind: TaskKind) => (kind === 'register' ? registerTask.value : loginTask.value)
+
+const markTaskCleared = (kind: TaskKind, task: RegisterTask | LoginTask) => {
+  const key = TASK_KEYS[kind].clearedKey
+  writeClearedTaskMeta(key, {
+    id: task.id,
+    created_at: task.created_at,
+  })
+}
+
+const setLogClearMarker = (kind: TaskKind, marker: TaskLogLine | null) => {
+  if (kind === 'register') {
+    registerLogClearMarker.value = marker
+  } else {
+    loginLogClearMarker.value = marker
+  }
+}
+
+const clearTaskSnapshot = (kind: TaskKind, persist = true) => {
+  if (kind === 'register') {
+    syncRegisterTask(null, persist)
+  } else {
+    syncLoginTask(null, persist)
+  }
+}
+
+const clearFinishedTask = (kind: TaskKind) => {
+  const task = getTaskByKind(kind)
+  if (!task || isTaskActive(task)) return
+  markTaskCleared(kind, task)
+  clearTaskSnapshot(kind, true)
+}
+
+const handleTaskIdle = (kind: TaskKind) => {
+  // 后端 idle：保留现有任务快照
+  cleanupCancelledTasks()
+}
+
+const handleTaskNotFound = (kind: TaskKind) => {
+  if (kind === 'register') {
+    clearRegisterTimer()
+    isRegistering.value = false
+  } else {
+    clearLoginTimer()
+    isRefreshing.value = false
+  }
+}
+
+const handleTaskActive = (kind: TaskKind, task: RegisterTask | LoginTask) => {
+  if (kind === 'register') {
+    syncRegisterTask(task)
+    isRegistering.value = true
+    startRegisterPolling(task.id)
+  } else {
+    syncLoginTask(task)
+    isRefreshing.value = true
+    startLoginPolling(task.id)
+  }
+}
+
+const handleTaskInactive = (kind: TaskKind, task: RegisterTask | LoginTask) => {
+  if (kind === 'register') {
+    syncRegisterTask(task)
+  } else {
+    syncLoginTask(task)
+  }
+}
+
+const shouldKeepInactiveTask = (kind: TaskKind, task: RegisterTask | LoginTask) => {
+  const dismissedMeta = readDismissedTaskMeta(TASK_KEYS[kind].dismissKey)
+  const clearedMeta = readClearedTaskMeta(TASK_KEYS[kind].clearedKey)
+  return !isTaskDismissed(task, dismissedMeta) && !isTaskMetaMatch(task, clearedMeta)
+}
+
+const loadCurrentTaskByKind = async (kind: TaskKind) => {
+  try {
+    const current = kind === 'register'
+      ? await accountsApi.getRegisterCurrent()
+      : await accountsApi.getLoginCurrent()
+    if (current && 'id' in current) {
+      const isActive = current.status === 'running' || current.status === 'pending'
+      if (isActive) {
+        handleTaskActive(kind, current)
+      } else if (shouldKeepInactiveTask(kind, current)) {
+        handleTaskInactive(kind, current)
+      }
+    } else {
+      handleTaskIdle(kind)
+    }
+  } catch (error: any) {
+    if (error?.status === 404 || error?.message === 'Not found') {
+      handleTaskNotFound(kind)
+    } else {
+      automationError.value = error.message || (kind === 'register' ? '加载注册任务失败' : '加载刷新任务失败')
+    }
+  }
 }
 
 const readClearMarker = (key: string): TaskLogLine | null => {
@@ -1405,8 +1530,11 @@ const syncRegisterTask = (task: RegisterTask | null, persist = true) => {
   if (task.id && task.id !== lastRegisterTaskId.value) {
     lastRegisterTaskId.value = task.id
     writeDismissedTaskMeta(REGISTER_DISMISS_KEY, null)
-    registerLogClearMarker.value = null
+    writeClearedTaskMeta(REGISTER_CLEARED_KEY, null)
+    setLogClearMarker('register', null)
     writeClearMarker(REGISTER_CLEAR_KEY, null)
+    // 新注册任务启动时，自动清理已结束的刷新任务，避免堆叠显示
+    clearFinishedTask('login')
   }
   if (persist) {
     writeCachedTask(REGISTER_TASK_CACHE_KEY, task)
@@ -1429,8 +1557,11 @@ const syncLoginTask = (task: LoginTask | null, persist = true) => {
   if (task.id && task.id !== lastLoginTaskId.value) {
     lastLoginTaskId.value = task.id
     writeDismissedTaskMeta(LOGIN_DISMISS_KEY, null)
-    loginLogClearMarker.value = null
+    writeClearedTaskMeta(LOGIN_CLEARED_KEY, null)
+    setLogClearMarker('login', null)
     writeClearMarker(LOGIN_CLEAR_KEY, null)
+    // 新刷新任务启动时，自动清理已结束的注册任务，避免堆叠显示
+    clearFinishedTask('register')
   }
   if (persist) {
     writeCachedTask(LOGIN_TASK_CACHE_KEY, task)
@@ -1442,16 +1573,18 @@ const hydrateTaskCache = () => {
   loginLogClearMarker.value = readClearMarker(LOGIN_CLEAR_KEY)
   const cachedRegister = readCachedTask<RegisterTask>(REGISTER_TASK_CACHE_KEY)
   if (cachedRegister) {
-    const dismissedMeta = readDismissedTaskMeta(REGISTER_DISMISS_KEY)
-    if (!isTaskDismissed(cachedRegister, dismissedMeta)) {
+    const dismissedMeta = readDismissedTaskMeta(TASK_KEYS.register.dismissKey)
+    const clearedMeta = readClearedTaskMeta(TASK_KEYS.register.clearedKey)
+    if (!isTaskDismissed(cachedRegister, dismissedMeta) && !isTaskMetaMatch(cachedRegister, clearedMeta)) {
       registerTask.value = cachedRegister
       lastRegisterTaskId.value = cachedRegister.id || null
     }
   }
   const cachedLogin = readCachedTask<LoginTask>(LOGIN_TASK_CACHE_KEY)
   if (cachedLogin) {
-    const dismissedMeta = readDismissedTaskMeta(LOGIN_DISMISS_KEY)
-    if (!isTaskDismissed(cachedLogin, dismissedMeta)) {
+    const dismissedMeta = readDismissedTaskMeta(TASK_KEYS.login.dismissKey)
+    const clearedMeta = readClearedTaskMeta(TASK_KEYS.login.clearedKey)
+    if (!isTaskDismissed(cachedLogin, dismissedMeta) && !isTaskMetaMatch(cachedLogin, clearedMeta)) {
       loginTask.value = cachedLogin
       lastLoginTaskId.value = cachedLogin.id || null
     }
@@ -1949,37 +2082,31 @@ const saveScheduledConfig = async () => {
 
 const clearTaskLogs = async () => {
   const confirmed = await confirmDialog.ask({
-    title: '清空任务记录',
-    message: '确定要清空当前任务与历史记录吗？此操作会删除数据库中的任务历史。',
+    title: '清空当前日志',
+    message: '确定要清空当前任务日志吗？',
     confirmText: '清空',
   })
   if (!confirmed) return
-  try {
-    const response = await fetch('/admin/task-history?confirm=yes', {
-      method: 'DELETE',
-      headers: { 'Content-Type': 'application/json' }
-    })
-    if (!response.ok) throw new Error('清空任务记录失败')
-    taskHistory.value = []
-    writeDismissedTaskMeta(REGISTER_DISMISS_KEY, {
-      id: registerTask.value?.id,
-      created_at: registerTask.value?.created_at,
-    })
-    writeDismissedTaskMeta(LOGIN_DISMISS_KEY, {
-      id: loginTask.value?.id,
-      created_at: loginTask.value?.created_at,
-    })
-    syncRegisterTask(null, true)
-    syncLoginTask(null, true)
-    registerLogClearMarker.value = null
-    loginLogClearMarker.value = null
-    writeClearMarker(REGISTER_CLEAR_KEY, null)
-    writeClearMarker(LOGIN_CLEAR_KEY, null)
-    automationError.value = ''
-    toast.success('任务记录已清空')
-  } catch (error: any) {
-    toast.error(error?.message || '清空任务记录失败')
+  const clearLogsFor = (kind: TaskKind) => {
+    const task = getTaskByKind(kind)
+    if (!task) return
+    if (!isTaskActive(task)) {
+      markTaskCleared(kind, task)
+      clearTaskSnapshot(kind, true)
+      return
+    }
+    const logs = (task.logs || []) as TaskLogLine[]
+    if (!logs.length) return
+    const marker = logs[logs.length - 1]
+    setLogClearMarker(kind, marker)
+    writeClearMarker(TASK_KEYS[kind].clearKey, marker)
   }
+
+  clearLogsFor('register')
+  clearLogsFor('login')
+
+  automationError.value = ''
+  toast.success('当前日志已清空')
 }
 
 const filterLogsAfterMarker = (logs: TaskLogLine[], marker: TaskLogLine | null) => {
@@ -2665,57 +2792,8 @@ const startBackgroundTaskPolling = () => {
 }
 
 const loadCurrentTasks = async () => {
-  try {
-    const registerCurrent = await accountsApi.getRegisterCurrent()
-    if (registerCurrent && 'id' in registerCurrent) {
-      const isActive = registerCurrent.status === 'running' || registerCurrent.status === 'pending'
-      const dismissedMeta = readDismissedTaskMeta(REGISTER_DISMISS_KEY)
-      if (isActive) {
-        syncRegisterTask(registerCurrent)
-        isRegistering.value = true
-        startRegisterPolling(registerCurrent.id)
-      } else if (!isTaskDismissed(registerCurrent, dismissedMeta)) {
-        syncRegisterTask(registerCurrent)
-      }
-    } else {
-      // 后端 idle：保留现有任务快照
-      cleanupCancelledTasks()
-    }
-  } catch (error: any) {
-    // 部分后端实现可能在无任务时返回 404：视为 idle，不提示 "Not found"
-    if (error?.status === 404 || error?.message === 'Not found') {
-      isRegistering.value = false
-      clearRegisterTimer()
-    } else {
-      automationError.value = error.message || '加载注册任务失败'
-    }
-  }
-
-  try {
-    const loginCurrent = await accountsApi.getLoginCurrent()
-    if (loginCurrent && 'id' in loginCurrent) {
-      const isActive = loginCurrent.status === 'running' || loginCurrent.status === 'pending'
-      const dismissedMeta = readDismissedTaskMeta(LOGIN_DISMISS_KEY)
-      if (isActive) {
-        syncLoginTask(loginCurrent)
-        isRefreshing.value = true
-        startLoginPolling(loginCurrent.id)
-      } else if (!isTaskDismissed(loginCurrent, dismissedMeta)) {
-        syncLoginTask(loginCurrent)
-      }
-    } else {
-      // 后端 idle：保留现有任务快照
-      cleanupCancelledTasks()
-    }
-  } catch (error: any) {
-    // 部分后端实现可能在无任务时返回 404：视为 idle，不提示 "Not found"
-    if (error?.status === 404 || error?.message === 'Not found') {
-      isRefreshing.value = false
-      clearLoginTimer()
-    } else {
-      automationError.value = error.message || '加载刷新任务失败'
-    }
-  }
+  await loadCurrentTaskByKind('register')
+  await loadCurrentTaskByKind('login')
 }
 
 const handleRegister = async () => {

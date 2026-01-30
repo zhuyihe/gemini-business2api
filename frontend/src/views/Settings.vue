@@ -94,21 +94,27 @@
                 <label class="col-span-2 text-xs text-muted-foreground">请求重试次数</label>
                 <input v-model.number="localSettings.retry.max_request_retries" type="number" min="0" class="col-span-2 rounded-2xl border border-input bg-background px-3 py-2" />
 
-                <label class="col-span-2 text-xs text-muted-foreground">账号切换次数</label>
+                <label class="col-span-2 text-xs text-muted-foreground">账户切换次数</label>
                 <input v-model.number="localSettings.retry.max_account_switch_tries" type="number" min="1" class="col-span-2 rounded-2xl border border-input bg-background px-3 py-2" />
 
                 <label class="col-span-2 text-xs text-muted-foreground">失败阈值</label>
                 <input v-model.number="localSettings.retry.account_failure_threshold" type="number" min="1" class="col-span-2 rounded-2xl border border-input bg-background px-3 py-2" />
 
-                <label class="col-span-2 text-xs text-muted-foreground">限流冷却（小时）</label>
-                <input v-model.number="rateLimitCooldownHours" type="number" min="1" max="12" step="1" class="col-span-2 rounded-2xl border border-input bg-background px-3 py-2" />
+                <label class="col-span-2 text-xs text-muted-foreground">对话冷却（小时）</label>
+                <input v-model.number="textRateLimitCooldownHours" type="number" min="1" max="24" step="1" class="col-span-2 rounded-2xl border border-input bg-background px-3 py-2" />
+
+                <label class="col-span-2 text-xs text-muted-foreground">绘图冷却（小时）</label>
+                <input v-model.number="imagesRateLimitCooldownHours" type="number" min="1" max="24" step="1" class="col-span-2 rounded-2xl border border-input bg-background px-3 py-2" />
+
+                <label class="col-span-2 text-xs text-muted-foreground">视频冷却（小时）</label>
+                <input v-model.number="videosRateLimitCooldownHours" type="number" min="1" max="24" step="1" class="col-span-2 rounded-2xl border border-input bg-background px-3 py-2" />
 
                 <label class="col-span-2 text-xs text-muted-foreground">会话缓存秒数</label>
                 <input v-model.number="localSettings.retry.session_cache_ttl_seconds" type="number" min="0" class="col-span-2 rounded-2xl border border-input bg-background px-3 py-2" />
 
                 <div class="col-span-2 flex items-center justify-between gap-2 text-xs text-muted-foreground">
-                  <span>自动刷新账号间隔（秒，0禁用）</span>
-                  <HelpTip text="仅在数据库存储启用时生效：用于检测账号配置变化并重载列表，不会刷新 cookie。文件存储模式不会触发。" />
+                  <span>自动刷新账号间隔（秒，0=关闭）</span>
+                  <HelpTip text="仅在数据库存储启用时生效：用于检测账号配置变化并重载列表，不会刷新 Cookie。" />
                 </div>
                 <input v-model.number="localSettings.retry.auto_refresh_accounts_seconds" type="number" min="0" max="600" class="col-span-2 rounded-2xl border border-input bg-background px-3 py-2" />
               </div>
@@ -376,19 +382,41 @@ const isSaving = ref(false)
 const errorMessage = ref('')
 
 // 429冷却时间：小时 ↔ 秒 的转换
-const rateLimitCooldownHours = computed({
-  get: () => {
-    if (!localSettings.value?.retry?.rate_limit_cooldown_seconds) return 1
-    const seconds = localSettings.value.retry.rate_limit_cooldown_seconds
-    const hours = Math.round(seconds / 3600)
-    return hours < 1 || hours > 12 ? 1 : hours
-  },
+const DEFAULT_COOLDOWN_HOURS = {
+  text: 2,
+  images: 4,
+  videos: 4
+} as const
+
+const toCooldownHours = (seconds: number | undefined, fallbackHours: number) => {
+  if (!seconds) return fallbackHours
+  return Math.max(1, Math.round(seconds / 3600))
+}
+
+const createCooldownHours = (
+  key: 'text_rate_limit_cooldown_seconds' | 'images_rate_limit_cooldown_seconds' | 'videos_rate_limit_cooldown_seconds',
+  fallbackHours: number
+) => computed({
+  get: () => toCooldownHours(localSettings.value?.retry?.[key], fallbackHours),
   set: (hours: number) => {
     if (localSettings.value?.retry) {
-      localSettings.value.retry.rate_limit_cooldown_seconds = hours * 3600
+      localSettings.value.retry[key] = hours * 3600
     }
   }
 })
+
+const textRateLimitCooldownHours = createCooldownHours(
+  'text_rate_limit_cooldown_seconds',
+  DEFAULT_COOLDOWN_HOURS.text
+)
+const imagesRateLimitCooldownHours = createCooldownHours(
+  'images_rate_limit_cooldown_seconds',
+  DEFAULT_COOLDOWN_HOURS.images
+)
+const videosRateLimitCooldownHours = createCooldownHours(
+  'videos_rate_limit_cooldown_seconds',
+  DEFAULT_COOLDOWN_HOURS.videos
+)
 
 const browserEngineOptions = [
   { label: 'UC - 支持无头/有头', value: 'uc' },
